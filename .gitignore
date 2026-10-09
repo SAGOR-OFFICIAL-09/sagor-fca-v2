@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.DS_Store
+sagor-e2ee-keys.json
+*.e2ee-keys.json

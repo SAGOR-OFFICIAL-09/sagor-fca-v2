@@ -43,7 +43,35 @@ const info = await api.getUserInfo(api.getCurrentUserID());
 
 See `fca-config.example.json` for the available options (copy to `fca-config.json`).
 
-## Notes
+## E2EE support (Signal protocol) 🔐
+
+SAGOR FCA v2.0.0 merges the full chat API with the from-scratch E2EE module (`e2ee.js` + `e2ee-bridge.js`).
+
+```js
+const login = require('sagor-fca');
+const { enableE2EE } = require('sagor-fca/e2ee-bridge');
+
+login({ appState }, async (err, api) => {
+  if (err) throw err;
+  await enableE2EE(api, { keyPath: './sagor-e2ee-keys.json' });
+
+  api.markE2EEThread('THREAD_ID'); // outgoing messages to this thread get encrypted
+
+  api.listen((err, event) => {
+    if (event && event.isE2EE) console.log('decrypted:', event.body);
+  });
+
+  console.log('my identity key:', api.getE2EIdentityKey());
+});
+```
+
+Sessions are established from the peer's pre-key bundle: `await api.e2ee.establishSession({ name: 'THREAD_ID', deviceId: 1 }, peerBundle)`.
+
+Notes:
+- E2EE keys are stored with file mode `0600` and never logged. Never commit `sagor-e2ee-keys.json`.
+- Facebook's server-side E2EE key distribution is not implemented — sessions must be bootstrapped manually. The on-the-wire envelope (`e2ee:<type>:<base64>`) is SAGOR's interim contract.
+
+## Notes (unofficial API)
 
 - This is an unofficial API. Facebook may restrict accounts that show bot-like behavior — use responsibly.
 - Keep your `appState`/cookies private. Never share them or commit them to git.
