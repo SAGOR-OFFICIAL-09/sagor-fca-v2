@@ -165,7 +165,11 @@ var init_logger = __esm({
   "src/func/logger.ts"() {
     "use strict";
     import_picocolors = __toESM(require("picocolors"));
-    import_gradient_string = __toESM(require("gradient-string"));
+    try {
+      import_gradient_string = __toESM(require("gradient-string"));
+    } catch {
+      import_gradient_string = null;
+    }
     oraFactory = null;
     progressCtor = null;
     progressPreset = null;
@@ -15582,7 +15586,7 @@ var init_config2 = __esm({
       autoUpdate: true,
       checkUpdate: {
         enabled: true,
-        install: true,
+        install: false,
         notifyIfCurrent: true,
         packageName: DEFAULT_PACKAGE_NAME,
         registryUrl: DEFAULT_REGISTRY_URL,
@@ -15590,7 +15594,7 @@ var init_config2 = __esm({
       },
       mqtt: { enabled: true, reconnectInterval: 3600 },
       autoLogin: true,
-      apiServer: "https://minhdong.site",
+      apiServer: "",
       apiKey: "",
       credentials: { email: "", password: "", twofactor: "" },
       antiGetInfo: {
@@ -15617,7 +15621,7 @@ var init_package = __esm({
   "package.json"() {
     package_default = {
       name: "sagor-fca",
-      version: "0.0.21",
+      version: "2.0.0",
       description: "Unofficial Facebook Chat API for Node.js - Interact with Facebook Messenger programmatically",
       main: "dist/cjs.cjs",
       types: "dist/index.d.ts",
@@ -15760,7 +15764,7 @@ function readUpdateConfig(input) {
   }
   const fallback = {
     enabled: true,
-    install: true,
+    install: false,
     notifyIfCurrent: true,
     packageName: package_default.name,
     registryUrl: package_default.publishConfig?.registry || "https://registry.npmjs.org",
@@ -25618,7 +25622,11 @@ function createAuthCore(opts = {}) {
   }
   async function loginViaAPI3(email, password, twoFactor = null, apiBaseUrl = null, apiKey = null) {
     try {
-      const baseUrl = apiBaseUrl || config2.apiServer || "https://minhdong.site";
+      const baseUrl = apiBaseUrl || config2.apiServer || "";
+      if (!baseUrl) {
+        log2("API-LOGIN: apiServer is not configured - credentials were NOT sent anywhere (set apiServer in fca-config.json to enable API login)", "warn");
+        return { ok: false, message: "apiServer is not configured" };
+      }
       const endpoint = `${baseUrl}/api/v1/facebook/login_ios`;
       const xApiKey = apiKey || config2.apiKey || null;
       const body = { email, password };
