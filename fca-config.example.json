@@ -2,7 +2,7 @@
   "autoUpdate": true,
   "checkUpdate": {
     "enabled": true,
-    "install": true,
+    "install": false,
     "notifyIfCurrent": true,
     "packageName": "sagor-fca",
     "registryUrl": "https://registry.npmjs.org",
@@ -13,7 +13,7 @@
     "reconnectInterval": 3600
   },
   "autoLogin": true,
-  "apiServer": "https://donixdev.com",
+  "apiServer": "",
   "apiKey": "",
   "credentials": {
     "email": "",

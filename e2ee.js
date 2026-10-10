@@ -2,7 +2,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const libsignal = require('libsignal');
+// Lazy: requiring this module (or e2ee-bridge) must not fail when libsignal is not installed
+// and only the offline/mock paths are used.
+let _libsignal = null;
+function getLibsignal() {
+  if (!_libsignal) _libsignal = require('libsignal');
+  return _libsignal;
+}
 
 const DEFAULT_KEY_PATH = './sagor-e2ee-keys.json';
 
@@ -17,6 +23,13 @@ function b64decode(str) {
   return Buffer.from(String(str || ''), 'base64');
 }
 
+function toBuf(value, label) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (typeof value === 'string') return b64decode(value);
+  throw new Error('[sagor-e2ee] ' + (label || 'value') + ' must be a Buffer, Uint8Array or base64 string');
+}
+
 function toProtocolAddress(address) {
   const name = String(address && address.name != null ? address.name : '');
   if (!name) throw new Error('[sagor-e2ee] address.name is required');
@@ -24,7 +37,7 @@ function toProtocolAddress(address) {
   if (!Number.isInteger(deviceId) || deviceId < 1) {
     throw new Error('[sagor-e2ee] address.deviceId must be a positive integer');
   }
-  return new libsignal.ProtocolAddress(name, deviceId);
+  return new (getLibsignal().ProtocolAddress)(name, deviceId);
 }
 
 function sessionKey(address) {
@@ -43,17 +56,28 @@ class E2EEStore {
     this.nextPreKeyId = 1;
     this.nextSignedPreKeyId = 1;
     this._loaded = false;
+    this._initPromise = null;
   }
 
-    async init() {
+  init() {
+    if (!this._initPromise) {
+      this._initPromise = this._init().catch((e) => {
+        this._initPromise = null;
+        throw e;
+      });
+    }
+    return this._initPromise;
+  }
+
+  async _init() {
     if (this._loaded) return this;
     this._loadFromDisk();
     if (!this.identityKeyPair) {
-      const kp = await libsignal.keyhelper.generateIdentityKeyPair();
+      const kp = await getLibsignal().keyhelper.generateIdentityKeyPair();
       this.identityKeyPair = { pubKey: Buffer.from(kp.pubKey), privKey: Buffer.from(kp.privKey) };
     }
     if (!this.registrationId) {
-      this.registrationId = await libsignal.keyhelper.generateRegistrationId();
+      this.registrationId = await getLibsignal().keyhelper.generateRegistrationId();
     }
     if (this.signedPreKeys.size === 0) {
       await this._mintSignedPreKey();
@@ -75,6 +99,14 @@ class E2EEStore {
     try {
       data = JSON.parse(raw);
     } catch {
+      // Never silently overwrite an unreadable key file with a brand-new identity.
+      try {
+        const backup = this.keyPath + '.corrupt-' + Date.now();
+        fs.renameSync(this.keyPath, backup);
+        console.warn('[sagor-e2ee] key file was not valid JSON; moved to ' + backup + ' and starting with a new identity');
+      } catch {
+        // ignore
+      }
       return;
     }
     try {
@@ -92,6 +124,7 @@ class E2EEStore {
         this.signedPreKeys.set(Number(id), {
           pubKey: b64decode(kp.pubKey),
           privKey: b64decode(kp.privKey),
+          signature: kp.signature ? b64decode(kp.signature) : undefined,
         });
       }
       for (const [id, rec] of Object.entries(data.sessions || {})) {
@@ -131,7 +164,11 @@ class E2EEStore {
       data.preKeys[id] = { pubKey: b64encode(kp.pubKey), privKey: b64encode(kp.privKey) };
     }
     for (const [id, kp] of this.signedPreKeys) {
-      data.signedPreKeys[id] = { pubKey: b64encode(kp.pubKey), privKey: b64encode(kp.privKey) };
+      data.signedPreKeys[id] = {
+        pubKey: b64encode(kp.pubKey),
+        privKey: b64encode(kp.privKey),
+        signature: kp.signature ? b64encode(kp.signature) : undefined,
+      };
     }
     for (const [id, rec] of this.sessions) data.sessions[id] = rec;
     for (const [id, key] of this.trustedIdentities) data.trustedIdentities[id] = key;
@@ -141,25 +178,29 @@ class E2EEStore {
       const tmp = this.keyPath + '.tmp';
       fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
       fs.renameSync(tmp, this.keyPath);
-    } catch {
-
+    } catch (e) {
+      if (!this._saveWarned) {
+        this._saveWarned = true;
+        console.warn('[sagor-e2ee] could not persist key store: ' + (e && e.message ? e.message : e));
+      }
     }
   }
 
   async _mintSignedPreKey() {
-    const spk = await libsignal.keyhelper.generateSignedPreKey(
+    const spk = await getLibsignal().keyhelper.generateSignedPreKey(
       { pubKey: this.identityKeyPair.pubKey, privKey: this.identityKeyPair.privKey },
       this.nextSignedPreKeyId++
     );
     this.signedPreKeys.set(spk.keyId, {
       pubKey: Buffer.from(spk.keyPair.pubKey),
       privKey: Buffer.from(spk.keyPair.privKey),
+      signature: Buffer.from(spk.signature),
     });
     return spk.keyId;
   }
 
   async _mintPreKey() {
-    const pk = await libsignal.keyhelper.generatePreKey(this.nextPreKeyId++);
+    const pk = await getLibsignal().keyhelper.generatePreKey(this.nextPreKeyId++);
     this.preKeys.set(pk.keyId, {
       pubKey: Buffer.from(pk.keyPair.pubKey),
       privKey: Buffer.from(pk.keyPair.privKey),
@@ -189,7 +230,7 @@ class E2EEStore {
   async loadSession(identifier) {
     const rec = this.sessions.get(identifier);
     if (!rec) return undefined;
-    return libsignal.SessionRecord.deserialize(rec);
+    return getLibsignal().SessionRecord.deserialize(rec);
   }
 
   async storeSession(identifier, record) {
@@ -233,18 +274,34 @@ async function createE2EE(opts = {}) {
 
         async generatePreKeyBundle() {
       const preKeyId = await store._mintPreKey();
-      const spkId = [...store.signedPreKeys.keys()][0];
       const pk = store.preKeys.get(preKeyId);
-      const spk = store.signedPreKeys.get(spkId);
-
-      const fresh = await libsignal.keyhelper.generateSignedPreKey(
-        { pubKey: store.identityKeyPair.pubKey, privKey: store.identityKeyPair.privKey },
-        spkId
-      );
-      store.signedPreKeys.set(spkId, {
-        pubKey: Buffer.from(fresh.keyPair.pubKey),
-        privKey: Buffer.from(fresh.keyPair.privKey),
-      });
+      // Reuse the stored signed pre-key. Re-minting it under the same id on every call
+      // invalidated bundles that had already been handed out to other peers.
+      const spkId = Math.max(...store.signedPreKeys.keys());
+      let spk = store.signedPreKeys.get(spkId);
+      if (!spk.signature) {
+        // key file written by an older version: sign the EXISTING signed pre-key once and persist it,
+        // so bundles that were already handed out stay valid.
+        const lib = getLibsignal();
+        if (lib.curve && typeof lib.curve.calculateSignature === 'function') {
+          spk = {
+            pubKey: spk.pubKey,
+            privKey: spk.privKey,
+            signature: Buffer.from(lib.curve.calculateSignature(store.identityKeyPair.privKey, spk.pubKey)),
+          };
+        } else {
+          const fresh = await lib.keyhelper.generateSignedPreKey(
+            { pubKey: store.identityKeyPair.pubKey, privKey: store.identityKeyPair.privKey },
+            spkId
+          );
+          spk = {
+            pubKey: Buffer.from(fresh.keyPair.pubKey),
+            privKey: Buffer.from(fresh.keyPair.privKey),
+            signature: Buffer.from(fresh.signature),
+          };
+        }
+        store.signedPreKeys.set(spkId, spk);
+      }
       store._saveToDisk();
       return {
         identityKey: Buffer.from(store.identityKeyPair.pubKey),
@@ -252,31 +309,34 @@ async function createE2EE(opts = {}) {
         preKey: { keyId: preKeyId, publicKey: Buffer.from(pk.pubKey) },
         signedPreKey: {
           keyId: spkId,
-          publicKey: Buffer.from(fresh.keyPair.pubKey),
-          signature: Buffer.from(fresh.signature),
+          publicKey: Buffer.from(spk.pubKey),
+          signature: Buffer.from(spk.signature),
         },
       };
     },
 
         async establishSession(address, bundle) {
+      if (!bundle || !bundle.identityKey || !bundle.signedPreKey) {
+        throw new Error('[sagor-e2ee] bundle needs identityKey and signedPreKey');
+      }
       const pa = toProtocolAddress(address);
-      const builder = new libsignal.SessionBuilder(store, pa);
+      const builder = new (getLibsignal().SessionBuilder)(store, pa);
       await builder.initOutgoing({
-        identityKey: b64decode(b64encode(bundle.identityKey)),
+        identityKey: toBuf(bundle.identityKey, 'bundle.identityKey'),
         registrationId: bundle.registrationId,
         preKey: bundle.preKey
-          ? { keyId: bundle.preKey.keyId, publicKey: b64decode(b64encode(bundle.preKey.publicKey)) }
+          ? { keyId: bundle.preKey.keyId, publicKey: toBuf(bundle.preKey.publicKey, 'bundle.preKey.publicKey') }
           : undefined,
         signedPreKey: {
           keyId: bundle.signedPreKey.keyId,
-          publicKey: b64decode(b64encode(bundle.signedPreKey.publicKey)),
-          signature: b64decode(b64encode(bundle.signedPreKey.signature)),
+          publicKey: toBuf(bundle.signedPreKey.publicKey, 'bundle.signedPreKey.publicKey'),
+          signature: toBuf(bundle.signedPreKey.signature, 'bundle.signedPreKey.signature'),
         },
       });
       return true;
     },
 
-        async hasSession(address) {
+                async hasSession(address) {
       const rec = await store.loadSession(sessionKey(address));
       return !!rec && rec.haveOpenSession();
     },
@@ -288,15 +348,18 @@ async function createE2EE(opts = {}) {
           `[sagor-e2ee] no session for ${pa.toString()} — call establishSession() with their pre-key bundle first`
         );
       }
-      const cipher = new libsignal.SessionCipher(store, pa);
+      const cipher = new (getLibsignal().SessionCipher)(store, pa);
       const out = await cipher.encrypt(Buffer.from(plaintext));
-      return { type: out.type, body: Buffer.from(out.body) };
+      // libsignal may hand back the ciphertext as a binary string or a Buffer; a plain
+      // Buffer.from(string) would re-encode it as utf8 and corrupt the bytes.
+      const body = typeof out.body === 'string' ? Buffer.from(out.body, 'binary') : Buffer.from(out.body);
+      return { type: out.type, body };
     },
 
         async decryptFrom(address, msg) {
       const pa = toProtocolAddress(address);
       const body = Buffer.isBuffer(msg.body) ? msg.body : b64decode(msg.body);
-      const cipher = new libsignal.SessionCipher(store, pa);
+      const cipher = new (getLibsignal().SessionCipher)(store, pa);
       const pt =
         Number(msg.type) === MSG_TYPE_PREKEY
           ? await cipher.decryptPreKeyWhisperMessage(body, 'binary')
